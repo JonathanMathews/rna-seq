@@ -1,4 +1,4 @@
-#!/usr/local/bin/ nextflow
+#!/usr/bin/env nextflow
 
 nextflow.enable.dsl=2
 
@@ -6,9 +6,10 @@ process trimFastp {
     
     label 'fastp'
     publishDir "${params.output}/trim", mode: 'copy'
+    container "biocontainers/fastp:v0.20.1_cv1"
 
     input:
-        tuple val(sampleID), path(fq1), path(fq2)
+        tuple val(runID), path(fq1), path(fq2), val(sampleID)
     output:
         tuple val(sampleID), path("${sampleID}.trim.R1.fq.gz"), path("${sampleID}.trim.R2.fq.gz"), emit: trimReads
         path("${sampleID}.trim_report.*"), emit: trimReports
@@ -21,21 +22,20 @@ process trimFastp {
 
 process alignHisat {
 
-    label 'hisat'
-    maxForks 1
+    label 'hisat2'
     publishDir "${params.output}/align", mode: 'copy'
+    container "nanozoo/hisat2:2.2.1.commit7e01700--5e923e8"
+
+    maxForks 1
 
     input:
-        tuple val(sampleID), path(trim1), path(trim2)
-        path(hisatIdx)
+        tuple val(sampleID), path(trim1), path(trim2), path(hisatIdx)
     output:
         tuple val(sampleID), path("${sampleID}.bam"), emit: alignBam
         path("${sampleID}.alignerout.txt"), emit: alignReport
-    when:
-
     script:
     """
-    tar --no-overwrite-dir -xzvf ${hisatIdx}
+    tar -xzvf ${hisatIdx}
 
     hisat2 -p ${params.threads} --rg-id ${sampleID} --rg LB:tx --rg PL:illumina --rg PU:barcode --rg SM:${sampleID} --dta -x hisat2_index/genome -1 ${trim1} -2 ${trim2} -S out.sam --summary-file ${sampleID}.alignerout.txt
 
@@ -51,8 +51,8 @@ process alignHisat {
 process featureCounts {
 
     label 'featureCounts'
-    maxForks 1
     publishDir "${params.output}/counts", mode: 'copy'
+    container "pegi3s/feature-counts:2.0.0"
 
     input:
         tuple val(sampleID), path(bam), path(annotation)
@@ -71,8 +71,8 @@ process featureCounts {
 process transcriptCounts {
 
     label 'stringtie'
-    maxForks 1
     publishDir "${params.output}/counts", mode: 'copy'
+    container "mgibio/stringtie:v2.2.1-focal"
 
     input:
         tuple val(sampleID), path(bam), path(transcript)
@@ -107,10 +107,10 @@ process statAnalysis {
         path(metadata)
         path(deq)
     output:
-        tuple path(volcano), path(pca), path(heatmap), path(distHeatmap), emit: figures
+        tuple path("volcano.png"), path("pca.png"), path("heatmap.png"), path("distance_heatmap.png"), path("GO_analysis.csv") emit: figures
     script:
     """
-    Rscript ${deq} "${countTables.join(" ")}" ${metadata} 
+    Rscript ${deq}
     """
 
 }
@@ -118,32 +118,38 @@ process statAnalysis {
 workflow {
 
     // Input raw fastq data
-    Channel.fromFilePairs("${params.inputFQ}/*_{1,2}.fq.gz", flat: true)
-    .set { trimInput }
+    Channel.fromFilePairs("${params.inputFQ}/*_{1,2}.fastq.gz", flat: true)
+    .set{ runIDMap }
 
+    // Input design file
+    Channel.fromPath("${params.designFile}")
+    .splitCsv( header: true, sep: "\t" )
+    .map { row -> tuple( row.RunID, row.SampleID ) }
+    .set{ sampleIDMap }
+
+    // Map Sample ID to Run ID
+    runIDMap.join( sampleIDMap )
+    .set{ trimInput }
+    
     // Trim
     trimFastp(trimInput)
 
     // Align
-    alignHisat(trimFastp.out.trimReads, Channel.value(file(params.hisatIdx)))
+    alignHisat(trimFastp.out.trimReads.combine(Channel.fromPath(params.hisatIdx)))
 
     // Feature Counts
-    // Channel.fromPath("/Volumes/seagate/bioinformatics/rnaseq/nfResults/align/*.bam")
-    // .map { it -> tuple(it.getSimpleName(),it) }
-    // .set { alignBam }
+    featureCounts(alignHisat.out.alignBam.combine(Channel.fromPath(params.annotationFile)))
 
-    // featureCounts(alignBam.combine(Channel.fromPath(params.annotationFile)))
+    // Transcript Counts
+    transcriptCounts(alignHisat.out.alignBam.combine(Channel.fromPath(params.transcriptFile)))
 
-    // // Transcript Counts
-    // transcriptCounts(alignHisat.out.alignBam.combine(Channel.fromPath(params.transcriptFile)))
+    // Stat Analysis
+    Channel.fromPath("${params.designFile}")
+    .set{ metadata }
 
-    // // DEQ
-    // Channel.fromPath("${params.designFile}")
-    // .set{ metadata }
+    Channel.fromPath("${params.statAnalysisFile}")
+    .set{ deq }
 
-    // Channel.fromPath("${params.statAnalysisFile}")
-    // .set{ deq }
-
-    // statAnalysis(featureCounts.out.countTxt.collect(), metadata, deq)
+    statAnalysis(featureCounts.out.countTxt.collect(), metadata, deq)
 
 }

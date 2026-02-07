@@ -139,3 +139,6 @@ mv SRR6875349.fpkm.txt SRR6875349_stringtie
 
 ## Step 4: R Script for statistical analysis of feature counts
 
+This will perform DEG analysis and output relevant figures and tables.
+
+**See `nextflow.config` to setup filesytem for running this pipeline.**
