@@ -52,7 +52,7 @@ process featureCounts {
 
     label 'featureCounts'
     publishDir "${params.output}/counts", mode: 'copy'
-    container "pegi3s/feature-counts:2.0.0"
+    container "pegi3s/feature-counts:latest"
 
     input:
         tuple val(sampleID), path(bam), path(annotation)
